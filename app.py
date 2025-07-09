@@ -59,7 +59,11 @@ for key, default in {
     "recording_started": False,
     "audio_played": False,
     "question_start_time": 0.0,
-    "record_phase": ""
+    "record_phase": "",
+    "audio_buffer": [], # <<< THIS LINE IS THE FIX FOR THE ERROR
+    "improvement_suggestions": "",
+    "improvement_suggestions_generated": False,
+    "difficulty": "Beginner",
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -956,6 +960,7 @@ if st.session_state["generated_questions"]:
                 if st.session_state.current_question_index >= len(st.session_state.generated_questions):
                     st.session_state.show_summary = True
                 st.rerun()
+
 
 
             # Time-out after 15 seconds if nothing recorded
