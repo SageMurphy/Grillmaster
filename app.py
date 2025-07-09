@@ -23,10 +23,23 @@ import whisper
 import speech_recognition as sr
 import logging
 #model = whisper.load_model("base")
+lock = threading.Lock()
+
+
+def audio_frame_callback(frame: av.AudioFrame):
+    """This function is called for each audio frame received from the browser."""
+    # We acquire a lock to ensure thread-safe access to the session state buffer.
+    with lock:
+        # Append the raw audio data (as bytes) to the buffer.
+        st.session_state.audio_buffer.append(frame.to_ndarray().tobytes())
+    return frame
+
 
 # Set up logger
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
 
 
 # ✅ MUST be the first Streamlit command
@@ -893,73 +906,73 @@ if st.session_state["generated_questions"]:
 
                 # Phase 2: Recording user's response
         elif st.session_state.record_phase == "recording":
-            st.markdown(f"<h4 class='timer-text'>🎙️ Recording... Speak now.</h4>", unsafe_allow_html=True)
-            
+            st.info("🎙️ Recording... Please speak your answer and click the 'Stop' button below when you are finished.")
+
             webrtc_ctx = webrtc_streamer(
                 key=f"record_{idx}",
                 mode=WebRtcMode.SENDONLY,
-                audio_receiver_size=2048,
+                audio_frame_callback=audio_frame_callback, # <-- Key change: attaching the callback
                 media_stream_constraints={"video": False, "audio": True},
                 async_processing=True,
             )
 
-            status_indicator = st.empty()
-
-            if webrtc_ctx.state.playing and webrtc_ctx.audio_receiver:
-                status_indicator.info("Audio connection live. Capturing your response...")
-                try:
-                    audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=1)
-                    for frame in audio_frames:
-                        st.session_state.audio_buffer.append(frame)
-                except av.error.TimeoutError:
-                    pass
-                
-                if time.time() - st.session_state.timer_start > 30: # 30-second max recording time
-                    status_indicator.warning("Recording time limit reached. Processing...")
-                    # Manually trigger processing by stopping the streamer's context
-                    if webrtc_ctx.audio_receiver:
-                         webrtc_ctx.audio_receiver.stop()
-
-            # This block runs when the stream stops (either by user clicking stop, or timeout)
-            if not webrtc_ctx.state.playing and st.session_state.audio_buffer:
-                status_indicator.info("Recording stopped. Processing your answer...")
-                
-                # Combine all audio frames from the buffer
-                sound_chunk = b"".join([frame.to_ndarray().tobytes() for frame in st.session_state.audio_buffer])
-                
-                # Save the combined audio to a temporary WAV file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_wav:
-                    sf.write(tmp_wav.name, sound_chunk, 48000, subtype='PCM_16', format='WAV')
-                    wav_path = tmp_wav.name
-
-                # Transcribe the audio file
-                recognizer = sr.Recognizer()
-                with sr.AudioFile(wav_path) as source:
-                    audio_data = recognizer.record(source)
-                try:
-                    transcript = recognizer.recognize_google(audio_data)
-                    st.success("✅ Answer captured and transcribed.")
-                    st.session_state.answers.append({"question": question, "response": transcript})
-                except sr.UnknownValueError:
-                    st.error("Audio was unclear. Could not transcribe.")
-                    st.session_state.answers.append({"question": question, "response": "[Could not understand audio]"})
-                except sr.RequestError as e:
-                    st.error(f"API Error during transcription: {e}")
-                    st.session_state.answers.append({"question": question, "response": f"[API Error]"})
-
-                # Reset state for the next question
-                st.session_state.update({"record_phase": "idle", "question_played": False, "current_question_index": idx + 1, "audio_buffer": []})
-                if st.session_state.current_question_index >= len(st.session_state.generated_questions):
-                    st.session_state.show_summary = True
+            # This block executes AFTER the user has clicked the 'Stop' button on the webrtc component.
+            if not webrtc_ctx.state.playing:
+                st.session_state.record_phase = "processing"
+                # We use rerun to immediately move to the processing phase.
                 st.rerun()
 
-            elif not webrtc_ctx.state.playing and not st.session_state.audio_buffer:
-                st.warning("No audio was recorded. Moving to the next question.")
-                st.session_state.answers.append({"question": question, "response": "[No audio recorded]"})
-                st.session_state.update({"record_phase": "idle", "question_played": False, "current_question_index": idx + 1})
-                if st.session_state.current_question_index >= len(st.session_state.generated_questions):
-                    st.session_state.show_summary = True
-                st.rerun()
+
+        # Phase 3: Processing the recorded audio
+        elif st.session_state.record_phase == "processing":
+            # This phase is entered after the recording is stopped.
+            with st.spinner("Processing your answer..."):
+                # Safely get the buffered audio data.
+                with lock:
+                    audio_buffer = st.session_state.audio_buffer
+
+                if not audio_buffer:
+                    st.warning("No audio was recorded. Moving to the next question.")
+                    st.session_state.answers.append({"question": question, "response": "[No audio recorded]"})
+                else:
+                    # Combine all buffered audio chunks into a single byte string.
+                    sound_chunk = b"".join(audio_buffer)
+
+                    # Save the combined audio to a temporary WAV file for transcription.
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_wav:
+                        sf.write(tmp_wav.name, sound_chunk, 48000, subtype='PCM_16', format='WAV')
+                        wav_path = tmp_wav.name
+
+                    # Transcribe the audio file using SpeechRecognition.
+                    recognizer = sr.Recognizer()
+                    with sr.AudioFile(wav_path) as source:
+                        audio_data = recognizer.record(source)
+                    try:
+                        transcript = recognizer.recognize_google(audio_data)
+                        st.success("✅ Answer captured and transcribed.")
+                        st.session_state.answers.append({"question": question, "response": transcript})
+                    except sr.UnknownValueError:
+                        st.error("Audio was unclear and could not be transcribed.")
+                        st.session_state.answers.append({"question": question, "response": "[Could not understand audio]"})
+                    except sr.RequestError as e:
+                        st.error(f"API Error during transcription: {e}")
+                        st.session_state.answers.append({"question": question, "response": f"[API Error]"})
+
+            # Reset state for the next question.
+            st.session_state.update({
+                "record_phase": "idle",
+                "question_played": False,
+                "current_question_index": idx + 1,
+                "audio_buffer": [] # IMPORTANT: Clear the buffer for the next recording.
+            })
+
+            # Check if the interview is over.
+            if st.session_state.current_question_index >= len(st.session_state.generated_questions):
+                st.session_state.show_summary = True
+
+            # Rerun to move to the next question or to the summary page.
+            st.rerun()
+
 
 
 
