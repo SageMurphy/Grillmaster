@@ -888,54 +888,97 @@ if st.session_state["generated_questions"]:
                 st.rerun()
 
         elif st.session_state["record_phase"] == "recording":
-            st.markdown(f"<h4 class='timer-text'>🎙️ Recording... (Speak now and wait to auto-save)</h4>", unsafe_allow_html=True)
+    st.markdown(f"<h4 class='timer-text'>🎙️ Recording... (Speak now and wait to auto-save)</h4>", unsafe_allow_html=True)
 
-            webrtc_ctx = webrtc_streamer(
-                key=f"record_{idx}",
-                mode=WebRtcMode.SENDRECV,
-                audio_receiver_size=1024,
-                media_stream_constraints={"video": False, "audio": True},
-                async_processing=True
-            )
+    webrtc_ctx = webrtc_streamer(
+        key=f"record_{idx}",
+        mode=WebRtcMode.SENDONLY,  # Use SENDONLY as we are only sending audio to the server
+        audio_receiver_size=1024,
+        media_stream_constraints={"video": False, "audio": True},
+        async_processing=True,
+    )
 
-            if webrtc_ctx.state.playing:
-                if webrtc_ctx.audio_receiver:
+    # A text placeholder to show transcription status
+    status_indicator = st.empty()
+
+    if "audio_buffer" not in st.session_state:
+        st.session_state["audio_buffer"] = []
+
+    # This loop is crucial. It waits for the audio receiver to be ready.
+    while True:
+        if webrtc_ctx.audio_receiver:
+            status_indicator.info("Audio connection established. Receiving audio...")
+            try:
+                # Get audio frames from the receiver. Timeout is important.
+                audio_frames = webrtc_ctx.audio_receiver.get_frames(timeout=10)
+                st.session_state["audio_buffer"].extend(audio_frames)
+            except (av.error.EOFError, av.error.ValueError, av.error.OSError):
+                # This block runs when the user stops the stream from the client side
+                status_indicator.info("Recording stopped. Processing...")
+                
+                # Check if we actually have any audio frames
+                if not st.session_state.audio_buffer:
+                    st.warning("No audio was recorded.")
+                    # Move to the next question with a "no response" placeholder
+                    st.session_state["answers"].append({
+                        "question": question,
+                        "response": "[No audio recorded]"
+                    })
+                else:
+                    # Convert collected frames to a WAV file
+                    sound_chunk = av.AudioFrame.from_ndarray(
+                        b''.join(frame.to_ndarray().tobytes() for frame in st.session_state.audio_buffer),
+                        format='s16',
+                        layout='mono'
+                    )
+                    wav_path = f"response_{idx}.wav"
+                    with open(wav_path, "wb") as f:
+                        f.write(sound_chunk.to_bytes())
+
+                    # Transcribe the audio
+                    recognizer = sr.Recognizer()
+                    with sr.AudioFile(wav_path) as source:
+                        audio = recognizer.record(source)
                     try:
-                        frames = webrtc_ctx.audio_receiver.get_frames(timeout=5)
-                        wav_path = f"response_{idx}.wav"
-                        convert_frames_to_wav(frames, wav_path)
-                        st.audio(wav_path)
-
-                        recognizer = sr.Recognizer()
-                        with sr.AudioFile(wav_path) as source:
-                            audio = recognizer.record(source)
-                            transcript = recognizer.recognize_google(audio)
-
-                        st.success("✅ Transcription completed.")
+                        transcript = recognizer.recognize_google(audio)
+                        st.success("✅ Transcription successful.")
                         st.session_state["answers"].append({
                             "question": question,
                             "response_file": wav_path,
                             "response": transcript
                         })
-
-                        st.session_state.update({
-                            "record_phase": "idle",
-                            "recording_started": False,
-                            "question_played": False,
-                            "question_start_time": 0.0,
-                            "current_question_index": idx + 1
+                    except sr.UnknownValueError:
+                        st.error("Google Speech Recognition could not understand the audio.")
+                        st.session_state["answers"].append({
+                            "question": question,
+                            "response": "[Could not understand audio]"
+                        })
+                    except sr.RequestError as e:
+                        st.error(f"Could not request results from Google Speech Recognition; {e}")
+                        st.session_state["answers"].append({
+                            "question": question,
+                            "response": f"[API Error: {e}]"
                         })
 
-                        if st.session_state["current_question_index"] == len(st.session_state["generated_questions"]):
-                            evaluate_answers()
-                            st.session_state["show_summary"] = True
-                        st.rerun()
+                # --- Reset for the next question ---
+                st.session_state.audio_buffer = [] # Clear buffer
+                st.session_state.update({
+                    "record_phase": "idle",
+                    "question_played": False,
+                    "current_question_index": idx + 1
+                })
 
-                    except Exception as e:
-                        st.error(f"🎤 Recording error or timeout: {e}")
+                if st.session_state["current_question_index"] >= len(st.session_state["generated_questions"]):
+                    evaluate_answers()
+                    st.session_state["show_summary"] = True
+                
+                # Break the loop and rerun to move to the next state
+                st.rerun()
 
-                else:
-                    st.warning("⚠️ No audio frames received yet. Please speak clearly into the mic.")
+        else:
+            # This is displayed while waiting for the connection
+            status_indicator.info("Please allow microphone access and start speaking.")
+            break
 
             # Time-out after 15 seconds if nothing recorded
             elapsed = time.time() - st.session_state.get("timer_start", 0)
