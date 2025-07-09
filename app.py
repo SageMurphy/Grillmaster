@@ -888,7 +888,7 @@ if st.session_state["generated_questions"]:
                 st.rerun()
 
         elif st.session_state["record_phase"] == "recording":
-    st.markdown(f"<h4 class='timer-text'>🎙️ Recording... (Speak now and wait to auto-save)</h4>", unsafe_allow_html=True)
+            st.markdown(f"<h4 class='timer-text'>🎙️ Recording... (Speak now and wait to auto-save)</h4>", unsafe_allow_html=True)
 
     webrtc_ctx = webrtc_streamer(
         key=f"record_{idx}",
