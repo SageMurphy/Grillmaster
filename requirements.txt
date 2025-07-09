@@ -1,0 +1,16 @@
+streamlit
+google-generativeai
+python-dotenv
+Pillow
+PyPDF2
+gTTS
+charset-normalizer
+pyttsx3
+speechrecognition
+pyaudio
+fpdf
+gtts
+edge-tts
+streamlit-webrtc
+soundfile
+av
